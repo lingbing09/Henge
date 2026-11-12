@@ -1,6 +1,14 @@
 import SwiftUI
 import UIKit
 
+/// What the Apple Pencil does when its tip moves along the screen (Settings > Pencil):
+/// drag (the tip holds the left button, so it clicks and drags) or scroll.
+enum PencilDrag: Int {
+    case drag = 0, scroll = 1
+    static let key = "henge.pencil.dragMode"
+    static var current: PencilDrag { PencilDrag(rawValue: UserDefaults.standard.integer(forKey: key)) ?? .drag }
+}
+
 /// A surface that works like a Mac's trackpad — it is one: the engine presents it on
 /// the Mac's USB bus as a Magic Trackpad 2, so the Mac's own multitouch engine sees
 /// the fingers: two scroll, three swipe between Spaces and to Mission Control, four
@@ -12,13 +20,22 @@ import UIKit
 ///    down so moving drags. These go out as mouse buttons alongside the pad's fingers.
 ///  - Volume buttons: the surface only points and gestures; the clicks live on the
 ///    volume keys (VolumeClicks), so a tap here does nothing.
-/// Only fingers count: a real trackpad or mouse goes through HardwareMouse.
+/// Only fingers count: a real trackpad or mouse goes through HardwareMouse. The Apple
+/// Pencil doesn't pretend to be a finger: it drives an absolute-position USB tablet the
+/// Mac also sees, so the pointer lands where the tip touches. A tap clicks; moving the
+/// tip along the glass drags or scrolls (PencilDrag). While the pencil is active,
+/// fingers are ignored (palm rejection), until half a second after it lifts.
 struct Trackpad: UIViewRepresentable {
     /// Four fingers tapped together: the session shows its hidden controls.
     static let revealTap = Notification.Name("henge.trackpad.revealTap")
 
+    /// The Mac's display in this view's coordinates, for the pencil's absolute
+    /// positioning; .zero where the surface isn't over the Mac's screen (the pencil
+    /// does nothing there).
+    var screen: CGRect = .zero
+
     func makeUIView(context: Context) -> Surface { Surface() }
-    func updateUIView(_ view: Surface, context: Context) {}
+    func updateUIView(_ view: Surface, context: Context) { view.screen = screen }
 
     final class Surface: UIView, UIPointerInteractionDelegate {
         /// The emulated pad's sensor, in the Magic Trackpad 2's own units.
@@ -42,6 +59,15 @@ struct Trackpad: UIViewRepresentable {
         private var holdTimer: Timer?
         private let buzz = UIImpactFeedbackGenerator(style: .medium)
         private var tapsClick: Bool { VolumeClicks.inputMode == .touchscreen }
+
+        /* The Apple Pencil (an absolute tablet to the Mac; see the type's doc). */
+        var screen: CGRect = .zero
+        private static let palmRest: TimeInterval = 0.5
+        private var pencilActiveUntil = Date.distantPast
+        private var pencilStarted = Date()
+        private var pencilTravelled: CGFloat = 0
+        /// While the pencil is on the glass (or just lifted), fingers are a resting palm.
+        private var pencilActive: Bool { Date() < pencilActiveUntil }
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -77,8 +103,9 @@ struct Trackpad: UIViewRepresentable {
         private static func ms(_ t: TimeInterval) -> UInt32 { UInt32(truncatingIfNeeded: Int(t * 1000)) }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            for t in touches where t.type == .pencil { pencilBegan(t) }
             let touches = touches.filter { $0.type == .direct }
-            guard !touches.isEmpty else { return }
+            guard !touches.isEmpty, !pencilActive else { return }
             if fingers.isEmpty {
                 started = Date()
                 travelled = 0
@@ -110,6 +137,8 @@ struct Trackpad: UIViewRepresentable {
         }
 
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            for t in touches where t.type == .pencil { pencilMoved(t, event: event) }
+            guard !pencilActive else { return }
             var moved = false
             let ts = Self.ms(event?.timestamp ?? touches.first?.timestamp ?? 0)
             for t in touches where t.type == .direct {
@@ -127,8 +156,65 @@ struct Trackpad: UIViewRepresentable {
             if moved { henge_vm_touch_frame(ts) }
         }
 
-        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }
-        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            for t in touches where t.type == .pencil { pencilEnded(t) }
+            lift(touches) /* only fingers it is already tracking, so a palm never gets here */
+        }
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            for t in touches where t.type == .pencil { pencilEnded(t) }
+            lift(touches)
+        }
+
+        /* The tip on the glass is the tablet's left button down, so a tap clicks and
+           moving drags -- unless the mode is scroll, where the button stays up, the pen
+           moves the pointer and its travel scrolls, and only a quick still tap clicks. */
+        private func pencilBegan(_ t: UITouch) {
+            pencilActiveUntil = Date().addingTimeInterval(Self.palmRest)
+            pencilStarted = Date()
+            pencilTravelled = 0
+            guard screen.width > 1, screen.height > 1 else { return }
+            let (x, y) = pencilPoint(t)
+            henge_vm_tablet(x, y, PencilDrag.current == .drag ? 1 : 0)
+            HengeLog.log("input", "pencil: down at \(x),\(y) mode \(PencilDrag.current.rawValue)")
+        }
+
+        private func pencilMoved(_ t: UITouch, event: UIEvent?) {
+            pencilActiveUntil = Date().addingTimeInterval(Self.palmRest)
+            guard screen.width > 1, screen.height > 1 else { return }
+            for s in event?.coalescedTouches(for: t) ?? [t] {
+                let (x, y) = pencilPoint(s)
+                let before = s.previousLocation(in: self), now = s.location(in: self)
+                pencilTravelled += abs(now.x - before.x) + abs(now.y - before.y)
+                if PencilDrag.current == .drag {
+                    henge_vm_tablet(x, y, 1)
+                } else {
+                    henge_vm_tablet(x, y, 0)
+                    let dx = Int32(now.x - before.x), dy = Int32(now.y - before.y)
+                    if dx != 0 || dy != 0 { henge_vm_mouse_scroll(dx * 2, -dy * 2) }
+                }
+            }
+        }
+
+        private func pencilEnded(_ t: UITouch) {
+            pencilActiveUntil = Date().addingTimeInterval(Self.palmRest)
+            guard screen.width > 1, screen.height > 1 else { return }
+            let (x, y) = pencilPoint(t)
+            let quick = Date().timeIntervalSince(pencilStarted) < Self.tapTime
+            if PencilDrag.current == .scroll && quick && pencilTravelled < Self.tapDistance {
+                henge_vm_tablet(x, y, 1) /* a tap is still a left click */
+                buzz.impactOccurred()
+            }
+            henge_vm_tablet(x, y, 0)
+            StickyKeys.shared.releaseAll()
+        }
+
+        /// Where the tip is on the Mac's display, as the tablet's 0..32767 coordinates.
+        private func pencilPoint(_ t: UITouch) -> (Int32, Int32) {
+            let p = t.location(in: self)
+            let nx = min(max((p.x - screen.minX) / screen.width, 0), 1)
+            let ny = min(max((p.y - screen.minY) / screen.height, 0), 1)
+            return (Int32(nx * 32767), Int32(ny * 32767))
+        }
 
         private func lift(_ touches: Set<UITouch>) {
             var lifted: [Int32] = []

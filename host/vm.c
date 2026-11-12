@@ -790,6 +790,8 @@ void hv_vm_touch_frame(uint32_t ts_ms) { hv_xhci_touch_frame(board.usb, ts_ms); 
 
 void hv_vm_touch_button(int down) { hv_xhci_touch_button(board.usb, down); }
 
+void hv_vm_tablet(int x, int y, int buttons) { hv_xhci_tablet(board.usb, x, y, buttons); }
+
 int hv_vm_pointer(int *x, int *y) {
     HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
     const uint8_t *page = pvg ? hv_pvg_lite_display_page(pvg) : NULL;

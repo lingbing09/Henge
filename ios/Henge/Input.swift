@@ -25,6 +25,10 @@ struct KeyboardCatcher: UIViewRepresentable {
             super.init(frame: frame)
             addSubview(listener)
             addSubview(typer)
+            /* Scribble: handwriting with the Apple Pencil arrives here as typed text,
+               which insertText then types into the Mac. It works while the keyboard is
+               up (this is the first responder then). */
+            typer.addInteraction(UIScribbleInteraction(delegate: nil))
             hiding = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
                                                             object: nil, queue: .main) { [weak self] _ in
                 self?.keyboardHid()

@@ -94,6 +94,9 @@ void henge_vm_mouse_scroll(int dx, int dy);
 void henge_vm_touch(int finger, int phase, int x, int y, uint32_t ts_ms);
 void henge_vm_touch_frame(uint32_t ts_ms); /* commit one frame with every finger that moved */
 void henge_vm_touch_button(int down); /* the pad's full press (a click) */
+/* The absolute tablet the pencil drives: x, y 0..32767 across the Mac's display,
+   buttons a bitmask (bit 0 left/tip). The pointer lands where the tip touches. */
+void henge_vm_tablet(int x, int y, int buttons);
 /* Where the guest has its pointer, in display pixels. 0, or -1 before it has one. */
 int henge_vm_pointer(int *x, int *y);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
