@@ -9,6 +9,10 @@ struct KeyboardCatcher: UIViewRepresentable {
 
     func makeUIView(context: Context) -> Holder { Holder() }
 
+    /// Scribble's delegate: the defaults are what we want (the pencil writes wherever
+    /// the user writes, while the typing view is the first responder).
+    private final class ScribbleDelegate: NSObject, UIScribbleInteractionDelegate {}
+
     func updateUIView(_ view: Holder, context: Context) {
         view.typer.onHide = { active = false }
         view.typing = active
@@ -18,6 +22,7 @@ struct KeyboardCatcher: UIViewRepresentable {
     final class Holder: UIView {
         let listener = KeyListener()
         let typer = CatcherView()
+        private let scribble = ScribbleDelegate()
         var typing = false
         private var hiding: NSObjectProtocol?
 
@@ -28,7 +33,7 @@ struct KeyboardCatcher: UIViewRepresentable {
             /* Scribble: handwriting with the Apple Pencil arrives here as typed text,
                which insertText then types into the Mac. It works while the keyboard is
                up (this is the first responder then). */
-            typer.addInteraction(UIScribbleInteraction(delegate: nil))
+            typer.addInteraction(UIScribbleInteraction(delegate: scribble))
             hiding = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
                                                             object: nil, queue: .main) { [weak self] _ in
                 self?.keyboardHid()
