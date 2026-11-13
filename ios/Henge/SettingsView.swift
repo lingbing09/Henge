@@ -19,6 +19,7 @@ struct SettingsView: View {
     @AppStorage(InstantResume.key) private var instantResume = false
     @AppStorage(MacAppsFeature.key) private var macApps = false
     @AppStorage(PencilDrag.key) private var pencilDrag = PencilDrag.scroll.rawValue
+    @AppStorage(PencilScribble.key) private var pencilScribble = false
 
     /// The second footer paragraph: how you click, given the selected input mode.
     private var inputDescription: String {
@@ -88,7 +89,12 @@ struct SettingsView: View {
                             Text("Drag, as a mouse").tag(PencilDrag.drag.rawValue)
                         }
                         .pickerStyle(.menu)
-                        Text("The pencil points where it touches: a tap is a left click, and moving the tip along the glass scrolls with momentum, as on iPad, or drags holding the left button, as a mouse does -- as chosen above. Writing on the Mac's screen types the words into the Mac (Scribble), opening the keyboard if it is closed. While the pencil is down, fingers are ignored, so a resting palm does nothing. Applies at once; the Mac needs a restart only if it has not picked up the pencil's device yet.")
+                        Toggle("Write on the screen", isOn: $pencilScribble)
+                        Text("The pencil points where it touches: a tap is a left click, and moving the tip along the glass scrolls with momentum, as on iPad, or drags holding the left button, as a mouse does -- as chosen above. While the pencil is down, fingers are ignored, so a resting palm does nothing. Applies at once; the Mac needs a restart only if it has not picked up the pencil's device yet.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Text(pencilScribble
+                             ? "Write on the screen is on: the whole Mac screen is a writable area, so handwriting types into the Mac and every pencil touch reads as a stroke, not a tap. Turn it off to use the pencil as a pointer."
+                             : "Write on the screen is off: the pencil is a plain pointer -- tap to click, slide to scroll. Turn it on to handwrite into the Mac's text fields.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     .listRowBackground(Desk.card)

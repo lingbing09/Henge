@@ -9,6 +9,17 @@ enum PencilDrag: Int {
     static var current: PencilDrag { PencilDrag(rawValue: UserDefaults.standard.integer(forKey: key)) ?? .scroll }
 }
 
+/// Whether the whole Mac screen is a writable area: writing on it with the pencil
+/// types into the Mac (Settings > Apple Pencil). Off, the pencil is purely a
+/// pointer -- a tap clicks and moving scrolls or drags -- and never opens the
+/// keyboard. Off by default, so Scribble only takes the pencil when asked; while
+/// it is on, the whole screen is writable, so every pencil touch reads as a
+/// stroke rather than a tap.
+enum PencilScribble {
+    static let key = "henge.pencil.scribble"
+    static var current: Bool { UserDefaults.standard.bool(forKey: key) }
+}
+
 /// A surface that works like a Mac's trackpad — it is one: the engine presents it on
 /// the Mac's USB bus as a Magic Trackpad 2, so the Mac's own multitouch engine sees
 /// the fingers: two scroll, three swipe between Spaces and to Mission Control, four
@@ -327,7 +338,10 @@ private final class IndirectScribble: NSObject, UIIndirectScribbleInteractionDel
     weak var surface: Trackpad.Surface?
 
     func indirectScribbleInteraction(_ interaction: UIInteraction, requestElementsIn rect: CGRect, completion: @escaping ([String]) -> Void) {
-        completion(surface?.screen.width ?? 0 > 1 ? [Self.element] : [])
+        /* Handwriting only when the switch is on; otherwise the pencil is a plain
+           pointer and no element is writable, so Scribble leaves it alone. */
+        let writable = PencilScribble.current && (surface?.screen.width ?? 0) > 1
+        completion(writable ? [Self.element] : [])
     }
 
     func indirectScribbleInteraction(_ interaction: UIInteraction, isElementFocused element: String) -> Bool {
