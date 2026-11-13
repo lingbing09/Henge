@@ -237,6 +237,22 @@ struct KeyboardCatcher: UIViewRepresentable {
         func position(within range: UITextRange, atCharacterOffset offset: Int) -> UITextPosition? {
             self.position(from: range.start, offset: offset)
         }
+        /* Required by UITextInput even though a one-line shadow document has no
+           columns: the ends of the range are as far as the caret can go. */
+        func position(within range: UITextRange, farthestIn direction: UITextLayoutDirection) -> UITextPosition? {
+            switch direction {
+            case .left: return range.start
+            case .right: return range.end
+            default: return nil
+            }
+        }
+        /* Optional, but the input system asks: what the text looks like. One style
+           throughout, so the Mac's own field does the drawing. */
+        func textStyling(at position: UITextPosition, in direction: UITextStorageDirection) -> [NSAttributedString.Key: Any]? { nil }
+        /// The view the input system attaches the keyboard to.
+        var textInputView: UIView { self }
+        /// Writing runs left to right; the Mac follows its own field's direction anyway.
+        var selectionAffinity: UITextStorageDirection = .forward
         func characterOffset(of position: UITextPosition, within range: UITextRange) -> Int {
             self.offset(from: range.start, to: position)
         }
