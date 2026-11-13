@@ -144,6 +144,8 @@ struct SessionView: View {
                 if state == 1 && graphicsState != 0 { graphicsCard(layout) }
                 if let error { errorCard(error, layout) }
                 KeyboardCatcher(active: $typing).frame(width: 0, height: 0)
+                    /* Writing on the screen with the pencil (Scribble) opens the keyboard to take the text. */
+                    .onReceive(NotificationCenter.default.publisher(for: Trackpad.scribbleFocus)) { _ in typing = true }
             }
             .frame(width: full.width, height: full.height)
             .ignoresSafeArea()

@@ -18,7 +18,7 @@ struct SettingsView: View {
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
     @AppStorage(InstantResume.key) private var instantResume = false
     @AppStorage(MacAppsFeature.key) private var macApps = false
-    @AppStorage(PencilDrag.key) private var pencilDrag = PencilDrag.drag.rawValue
+    @AppStorage(PencilDrag.key) private var pencilDrag = PencilDrag.scroll.rawValue
 
     /// The second footer paragraph: how you click, given the selected input mode.
     private var inputDescription: String {
@@ -83,12 +83,12 @@ struct SettingsView: View {
                     }
                     .listRowBackground(Desk.card)
                     Section("Apple Pencil") {
-                        Picker("Drag the tip along the screen", selection: $pencilDrag) {
-                            Text("Drag").tag(PencilDrag.drag.rawValue)
-                            Text("Scroll").tag(PencilDrag.scroll.rawValue)
+                        Picker("Move the tip along the screen", selection: $pencilDrag) {
+                            Text("Scroll, as on iPad").tag(PencilDrag.scroll.rawValue)
+                            Text("Drag, as a mouse").tag(PencilDrag.drag.rawValue)
                         }
                         .pickerStyle(.menu)
-                        Text("The pencil points where it touches: a tap is a left click, and moving the tip along the glass drags (it holds the left button) or scrolls, as chosen above. While the pencil is down, fingers are ignored, so a resting palm does nothing. With the keyboard open, writing with the pencil types into the Mac (Scribble). Applies at once; the Mac needs a restart only if it has not picked up the pencil's device yet.")
+                        Text("The pencil points where it touches: a tap is a left click, and moving the tip along the glass scrolls with momentum, as on iPad, or drags holding the left button, as a mouse does -- as chosen above. Writing on the Mac's screen types the words into the Mac (Scribble), opening the keyboard if it is closed. While the pencil is down, fingers are ignored, so a resting palm does nothing. Applies at once; the Mac needs a restart only if it has not picked up the pencil's device yet.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     .listRowBackground(Desk.card)

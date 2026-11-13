@@ -1,12 +1,12 @@
 import SwiftUI
 import UIKit
 
-/// What the Apple Pencil does when its tip moves along the screen (Settings > Pencil):
-/// drag (the tip holds the left button, so it clicks and drags) or scroll.
+/// What the Apple Pencil does when its tip moves along the screen (Settings > Apple Pencil):
+/// scroll, as on iPad (the default), or drag, as a mouse does.
 enum PencilDrag: Int {
-    case drag = 0, scroll = 1
+    case scroll = 0, drag = 1
     static let key = "henge.pencil.dragMode"
-    static var current: PencilDrag { PencilDrag(rawValue: UserDefaults.standard.integer(forKey: key)) ?? .drag }
+    static var current: PencilDrag { PencilDrag(rawValue: UserDefaults.standard.integer(forKey: key)) ?? .scroll }
 }
 
 /// A surface that works like a Mac's trackpad — it is one: the engine presents it on
@@ -22,12 +22,17 @@ enum PencilDrag: Int {
 ///    volume keys (VolumeClicks), so a tap here does nothing.
 /// Only fingers count: a real trackpad or mouse goes through HardwareMouse. The Apple
 /// Pencil doesn't pretend to be a finger: it drives an absolute-position USB tablet the
-/// Mac also sees, so the pointer lands where the tip touches. A tap clicks; moving the
-/// tip along the glass drags or scrolls (PencilDrag). While the pencil is active,
-/// fingers are ignored (palm rejection), until half a second after it lifts.
+/// Mac also sees, so the pointer lands where the tip touches, and a tap clicks. Moving
+/// the tip along the glass scrolls as on iPad -- it rides the Magic Trackpad as a
+/// two-finger gesture, so the Mac's own gesture engine scrolls, momentum and all --
+/// or drags as a mouse does (PencilDrag). Writing on the screen types into the Mac
+/// (Scribble; see IndirectScribble). While the pencil is active, fingers are ignored
+/// (palm rejection), until half a second after it lifts.
 struct Trackpad: UIViewRepresentable {
     /// Four fingers tapped together: the session shows its hidden controls.
     static let revealTap = Notification.Name("henge.trackpad.revealTap")
+    /// A pencil started handwriting on the screen: the keyboard opens to take the text.
+    static let scribbleFocus = Notification.Name("henge.trackpad.scribbleFocus")
 
     /// The Mac's display in this view's coordinates, for the pencil's absolute
     /// positioning; .zero where the surface isn't over the Mac's screen (the pencil
@@ -69,11 +74,26 @@ struct Trackpad: UIViewRepresentable {
         /// While the pencil is on the glass (or just lifted), fingers are a resting palm.
         private var pencilActive: Bool { Date() < pencilActiveUntil }
 
+        /* Scrolling with the tip is a two-finger gesture on the emulated pad, so the
+           Mac's own gesture engine scrolls with momentum, as on iPad. The pair uses
+           finger IDs a hand never gets. */
+        private static let pencilFingerA: Int32 = 6
+        private static let pencilFingerB: Int32 = 7
+        private var pencilFingersDown = false
+
+        /* Scribble: the screen is a writable area, so writing on it with the pencil
+           types into the Mac. While a stroke is being read as handwriting it must not
+           also drive the Mac's pointer. */
+        var scribbleWriting = false
+        private let scribble = IndirectScribble()
+
         override init(frame: CGRect) {
             super.init(frame: frame)
             isMultipleTouchEnabled = true
             backgroundColor = .clear
             addInteraction(UIPointerInteraction(delegate: self))
+            scribble.surface = self
+            addInteraction(UIIndirectScribbleInteraction(delegate: scribble))
         }
 
         /// Over the Mac there is only the Mac's pointer, if iPadOS hasn't locked its own away.
@@ -165,22 +185,27 @@ struct Trackpad: UIViewRepresentable {
             lift(touches)
         }
 
-        /* The tip on the glass is the tablet's left button down, so a tap clicks and
-           moving drags -- unless the mode is scroll, where the button stays up, the pen
-           moves the pointer and its travel scrolls, and only a quick still tap clicks. */
+        /* The tip on the glass is the tablet's left button down in drag mode, so a tap
+           clicks and moving drags. In scroll mode the button stays up and the travel
+           becomes a two-finger scroll on the pad; only a quick still tap clicks. A
+           stroke being read as handwriting (Scribble) drives nothing. */
         private func pencilBegan(_ t: UITouch) {
             pencilActiveUntil = Date().addingTimeInterval(Self.palmRest)
             pencilStarted = Date()
             pencilTravelled = 0
-            guard screen.width > 1, screen.height > 1 else { return }
+            pencilFingersDown = false
+            guard screen.width > 1, screen.height > 1, !scribbleWriting else { return }
             let (x, y) = pencilPoint(t)
+            /* The pointer lands where the tip touches. The scroll gesture's fingers wait
+               for real travel (pencilMoved): a tap must never reach the pad as a
+               two-finger tap, which the Mac would read as a right click. */
             henge_vm_tablet(x, y, PencilDrag.current == .drag ? 1 : 0)
             HengeLog.log("input", "pencil: down at \(x),\(y) mode \(PencilDrag.current.rawValue)")
         }
 
         private func pencilMoved(_ t: UITouch, event: UIEvent?) {
             pencilActiveUntil = Date().addingTimeInterval(Self.palmRest)
-            guard screen.width > 1, screen.height > 1 else { return }
+            guard screen.width > 1, screen.height > 1, !scribbleWriting else { return }
             for s in event?.coalescedTouches(for: t) ?? [t] {
                 let (x, y) = pencilPoint(s)
                 let before = s.previousLocation(in: self), now = s.location(in: self)
@@ -189,15 +214,21 @@ struct Trackpad: UIViewRepresentable {
                     henge_vm_tablet(x, y, 1)
                 } else {
                     henge_vm_tablet(x, y, 0)
-                    let dx = Int32(now.x - before.x), dy = Int32(now.y - before.y)
-                    if dx != 0 || dy != 0 { henge_vm_mouse_scroll(dx * 2, -dy * 2) }
+                    if pencilFingersDown {
+                        scrollGesture(with: s, phase: 1)
+                    } else if pencilTravelled >= Self.tapDistance {
+                        scrollGesture(with: s, phase: 0) /* the stroke is a scroll: the pair lands */
+                    }
                 }
             }
         }
 
         private func pencilEnded(_ t: UITouch) {
             pencilActiveUntil = Date().addingTimeInterval(Self.palmRest)
-            guard screen.width > 1, screen.height > 1 else { return }
+            if pencilFingersDown { /* lift the pair; the Mac's momentum takes it from here */
+                scrollGesture(with: t, phase: 2)
+            }
+            guard screen.width > 1, screen.height > 1, !scribbleWriting else { return }
             let (x, y) = pencilPoint(t)
             let quick = Date().timeIntervalSince(pencilStarted) < Self.tapTime
             if PencilDrag.current == .scroll && quick && pencilTravelled < Self.tapDistance {
@@ -206,6 +237,20 @@ struct Trackpad: UIViewRepresentable {
             }
             henge_vm_tablet(x, y, 0)
             StickyKeys.shared.releaseAll()
+        }
+
+        /// The scroll gesture's two fingers straddle the tip and move as one with it:
+        /// down, moved or lifted, a hand's width apart, clear of the sensor's edges.
+        private func scrollGesture(with t: UITouch, phase: Int32) {
+            let ts = Self.ms(t.timestamp)
+            let (sx, sy) = sensor(t)
+            let gap: Int32 = 500
+            let ax = min(max(sx, gap), Self.sensorW - gap)
+            let ay = min(max(sy, gap), Self.sensorH - gap)
+            henge_vm_touch(Self.pencilFingerA, phase, ax - gap, ay, ts)
+            henge_vm_touch(Self.pencilFingerB, phase, ax + gap, ay, ts)
+            henge_vm_touch_frame(ts)
+            pencilFingersDown = phase != 2
         }
 
         /// Where the tip is on the Mac's display, as the tablet's 0..32767 coordinates.
@@ -271,6 +316,52 @@ struct Trackpad: UIViewRepresentable {
             holdTimer?.invalidate()
             holdTimer = nil
         }
+    }
+}
+
+/// Scribble's view of the surface: the whole Mac screen is one writable element.
+/// Focusing it opens the session's keyboard, whose typing view (a UITextInput)
+/// takes the recognized text and types it into the Mac.
+private final class IndirectScribble: NSObject, UIIndirectScribbleInteractionDelegate {
+    private static let element = "mac"
+    weak var surface: Trackpad.Surface?
+
+    func indirectScribbleInteraction(_ interaction: UIInteraction, requestElementsIn rect: CGRect, completion: @escaping ([String]) -> Void) {
+        completion(surface?.screen.width ?? 0 > 1 ? [Self.element] : [])
+    }
+
+    func indirectScribbleInteraction(_ interaction: UIInteraction, isElementFocused element: String) -> Bool {
+        KeyboardCatcher.sharedTyper?.isFirstResponder ?? false
+    }
+
+    func indirectScribbleInteraction(_ interaction: UIInteraction, frameForElement element: String) -> CGRect {
+        surface?.screen ?? .zero
+    }
+
+    func indirectScribbleInteraction(_ interaction: UIInteraction, focusElementIfNeeded element: String, referencePoint: CGPoint, completion: @escaping ((UIResponder & UITextInput)?) -> Void) {
+        NotificationCenter.default.post(name: Trackpad.scribbleFocus, object: nil)
+        /* Opening the keyboard goes through SwiftUI, so wait until the typing view is
+           really the first responder before handing it over. */
+        var tries = 0
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
+            tries += 1
+            guard tries <= 20 else {
+                timer.invalidate()
+                completion(KeyboardCatcher.sharedTyper)
+                return
+            }
+            guard let typer = KeyboardCatcher.sharedTyper, typer.isFirstResponder else { return }
+            timer.invalidate()
+            completion(typer)
+        }
+    }
+
+    func indirectScribbleInteraction(_ interaction: UIInteraction, willBeginWritingInElement element: String) {
+        surface?.scribbleWriting = true
+    }
+
+    func indirectScribbleInteraction(_ interaction: UIInteraction, didFinishWritingInElement element: String) {
+        surface?.scribbleWriting = false
     }
 }
 

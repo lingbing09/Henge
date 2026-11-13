@@ -7,11 +7,10 @@ import UIKit
 struct KeyboardCatcher: UIViewRepresentable {
     @Binding var active: Bool
 
-    func makeUIView(context: Context) -> Holder { Holder() }
+    /// The view handwriting (Scribble) types into; set once the holder exists.
+    static weak var sharedTyper: CatcherView?
 
-    /// Scribble's delegate: the defaults are what we want (the pencil writes wherever
-    /// the user writes, while the typing view is the first responder).
-    private final class ScribbleDelegate: NSObject, UIScribbleInteractionDelegate {}
+    func makeUIView(context: Context) -> Holder { Holder() }
 
     func updateUIView(_ view: Holder, context: Context) {
         view.typer.onHide = { active = false }
@@ -22,7 +21,6 @@ struct KeyboardCatcher: UIViewRepresentable {
     final class Holder: UIView {
         let listener = KeyListener()
         let typer = CatcherView()
-        private let scribble = ScribbleDelegate()
         var typing = false
         private var hiding: NSObjectProtocol?
 
@@ -30,10 +28,7 @@ struct KeyboardCatcher: UIViewRepresentable {
             super.init(frame: frame)
             addSubview(listener)
             addSubview(typer)
-            /* Scribble: handwriting with the Apple Pencil arrives here as typed text,
-               which insertText then types into the Mac. It works while the keyboard is
-               up (this is the first responder then). */
-            typer.addInteraction(UIScribbleInteraction(delegate: scribble))
+            KeyboardCatcher.sharedTyper = typer
             hiding = NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification,
                                                             object: nil, queue: .main) { [weak self] _ in
                 self?.keyboardHid()
@@ -89,7 +84,7 @@ struct KeyboardCatcher: UIViewRepresentable {
         }
     }
 
-    final class CatcherView: KeyListener, UIKeyInput {
+    final class CatcherView: KeyListener, UIKeyInput, UITextInput {
         var onHide: () -> Void = {}
         private lazy var row: UIHostingController<ModifierRow> = {
             let host = UIHostingController(rootView: ModifierRow(hide: { [weak self] in self?.onHide() }))
@@ -101,24 +96,159 @@ struct KeyboardCatcher: UIViewRepresentable {
         }()
 
         override var inputAccessoryView: UIView? { row.view }
-        var hasText: Bool { true }
         var autocorrectionType: UITextAutocorrectionType = .no
         var autocapitalizationType: UITextAutocapitalizationType = .none
         var spellCheckingType: UITextSpellCheckingType = .no
         var smartQuotesType: UITextSmartQuotesType = .no
         var smartDashesType: UITextSmartDashesType = .no
 
-        func insertText(_ text: String) {
-            guard !HardwareKeys.keyJustPressed else { return }
-            for c in text { Keys.type(c) }
+        /* Scribble (and any other text input client) needs a real UITextInput. The
+           document itself lives in the Mac; this shadow copy only tracks what was
+           typed, so handwriting gestures like scratch-out can send backspaces. */
+        final class Position: UITextPosition {
+            let at: Int
+            init(_ at: Int) { self.at = at }
+        }
+        final class Range: UITextRange {
+            let from: Position, to: Position
+            init(_ from: Position, _ to: Position) { self.from = from; self.to = to }
+            override var start: UITextPosition { from }
+            override var end: UITextPosition { to }
+            override var isEmpty: Bool { from.at == to.at }
+        }
+
+        private var document = ""
+        private var marked: NSRange? /* of the document, in characters */
+        private var selection: NSRange? /* ditto */
+
+        var hasText: Bool { true }
+
+        /// Text for the Mac: ASCII is typed key by key; anything else (Chinese
+        /// handwriting, say) is pasted, which needs the helper to carry it over.
+        private func forward(_ text: String) {
+            guard !text.isEmpty, !HardwareKeys.keyJustPressed else { return }
+            if text.allSatisfy(\.isASCII) {
+                for c in text { Keys.type(c) }
+            } else {
+                Sharing.paste(text)
+            }
             StickyKeys.shared.releaseAll()
+        }
+
+        private func position(_ at: Int) -> Position { Position(max(0, min(at, document.count))) }
+        private func offsets(_ range: UITextRange) -> NSRange {
+            let start = min((range.start as? Position)?.at ?? 0, document.count)
+            let end = min((range.end as? Position)?.at ?? 0, document.count)
+            return NSRange(location: min(start, end), length: abs(end - start))
+        }
+        /// N characters leave the Mac: backspaces for what the shadow document loses.
+        private func remove(_ count: Int) {
+            guard count > 0 else { return }
+            for _ in 0..<count { deleteBackward() }
+        }
+        private func append(_ text: String) {
+            document += text
+            if document.count > 400 { document = String(document.suffix(400)) }
+            forward(text)
+        }
+
+        func insertText(_ text: String) {
+            if let marked { /* committed text replaces the marked run it grew from */
+                remove(marked.length)
+                self.marked = nil
+            }
+            append(text)
         }
 
         func deleteBackward() {
             guard !HardwareKeys.keyJustPressed else { return }
+            if !document.isEmpty { document.removeLast() }
             Keys.press(Keys.backspace)
             StickyKeys.shared.releaseAll()
         }
+
+        /* UITextInput. Positions are character offsets in the shadow document. */
+
+        var inputDelegate: (any UITextInputDelegate)?
+        private lazy var inputTokenizer: UITextInputTokenizer = UITextInputStringTokenizer(textInput: self)
+        var tokenizer: UITextInputTokenizer { inputTokenizer }
+        var markedTextStyle: [NSAttributedString.Key: Any]?
+        var markedTextRange: UITextRange? {
+            guard let marked else { return nil }
+            return Range(position(marked.location), position(marked.location + marked.length))
+        }
+        var selectedTextRange: UITextRange? {
+            get {
+                let at = selection?.location ?? document.count
+                return Range(position(at), position(at + (selection?.length ?? 0)))
+            }
+            set { selection = newValue.map { offsets($0) } }
+        }
+        var beginningOfDocument: UITextPosition { position(0) }
+        var endOfDocument: UITextPosition { position(document.count) }
+
+        func text(in range: UITextRange) -> String? {
+            let o = offsets(range)
+            let start = document.index(document.startIndex, offsetBy: o.location)
+            let end = document.index(start, offsetBy: o.length)
+            return String(document[start..<end])
+        }
+
+        func replace(_ range: UITextRange, withText text: String) {
+            let o = offsets(range)
+            remove(o.length)
+            append(text)
+        }
+
+        func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+            if let marked { remove(marked.length) }
+            if let markedText, !markedText.isEmpty {
+                marked = NSRange(location: document.count, length: markedText.count)
+                append(markedText)
+            } else {
+                marked = nil
+            }
+        }
+
+        func unmarkText() { marked = nil }
+
+        func textRange(from: UITextPosition, to: UITextPosition) -> UITextRange? {
+            Range(position((from as? Position)?.at ?? 0), position((to as? Position)?.at ?? 0))
+        }
+        func position(from position: UITextPosition, offset: Int) -> UITextPosition? {
+            let at = ((position as? Position)?.at ?? 0) + offset
+            return (0...document.count).contains(at) ? Position(at) : nil
+        }
+        func position(from position: UITextPosition, in direction: UITextLayoutDirection, offset: Int) -> UITextPosition? {
+            let at = (position as? Position)?.at ?? 0
+            switch direction {
+            case .left: return at - offset >= 0 ? Position(at - offset) : nil
+            case .right: return at + offset <= document.count ? Position(at + offset) : nil
+            default: return offset == 0 ? Position(at) : nil
+            }
+        }
+        func compare(_ position: UITextPosition, to other: UITextPosition) -> ComparisonResult {
+            let a = (position as? Position)?.at ?? 0, b = (other as? Position)?.at ?? 0
+            return a < b ? .orderedAscending : a > b ? .orderedDescending : .orderedSame
+        }
+        func offset(from: UITextPosition, to: UITextPosition) -> Int {
+            ((to as? Position)?.at ?? 0) - ((from as? Position)?.at ?? 0)
+        }
+        func position(within range: UITextRange, atCharacterOffset offset: Int) -> UITextPosition? {
+            self.position(from: range.start, offset: offset)
+        }
+        func characterOffset(of position: UITextPosition, within range: UITextRange) -> Int {
+            self.offset(from: range.start, to: position)
+        }
+        func baseWritingDirection(for position: UITextPosition, in direction: UITextStorageDirection) -> NSWritingDirection { .leftToRight }
+        func setBaseWritingDirection(_ writingDirection: NSWritingDirection, for range: UITextRange) {}
+        func caretRect(for position: UITextPosition) -> CGRect { CGRect(x: 0, y: 0, width: 2, height: 20) }
+        func firstRect(for range: UITextRange) -> CGRect { caretRect(for: range.start) }
+        func selectionRects(for range: UITextRange) -> [UITextSelectionRect] { [] }
+        func closestPosition(to point: CGPoint) -> UITextPosition? { position(document.count) }
+        func closestPosition(to point: CGPoint, within range: UITextRange) -> UITextPosition? { range.end }
+        func characterRange(at point: CGPoint) -> UITextRange? { Range(position(document.count), position(document.count)) }
+        func characterRange(byExtending position: UITextPosition, in direction: UITextLayoutDirection) -> UITextRange? { nil }
     }
 }
 
